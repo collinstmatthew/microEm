@@ -1,4 +1,6 @@
 {-# LANGUAGE Arrows #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
 
 module Main where
 
@@ -9,7 +11,6 @@ import qualified Control.Category as Cat
 import Data.List
 
 import Data.Maybe
-import System.Random
 
 type Bus8Bit = (Bool,Bool,Bool,Bool,Bool,Bool,Bool,Bool)
 type CarryIn = Bool
@@ -67,8 +68,6 @@ halfAdder :: Bool -> Bool -> (Bool, Bool)
 halfAdder a b = (a !|| b, a && b)
 
 
-delay :: a -> Circuit a a
-delay last = Circuit $ \this -> (delay this, last)
 
 notA :: Circuit Bool Bool
 notA = Circuit $ \a -> (notA, not a)
@@ -126,11 +125,27 @@ orGate' = proc (a,b) -> do
     m2 <- nandGate -< (b,b)
     nandGate -< (m1,m2)
 
+delay :: a -> Circuit a a
+delay last = Circuit $ \this -> (delay this, last)
+
+exF :: (a -> (b,c)) -> (a -> c)
+exF f = (\x -> snd (f x)) where
+
+
+rsFlipFlop :: Bool -> Circuit (Bool,Bool) Bool
+rsFlipFlop last = Circuit $ f where
+    f (False,True)  = (rsFlipFlop False, False)
+    f (True,False)  = (rsFlipFlop True, True)
+    f (False,False) = (rsFlipFlop last, last)
+    f (True,True)   = error "RS Flip Flop cannot have (True,True) as input"
+
 --main :: IO Bool
 main = do
     print $ runCircuit (delay 0) [5,6,7]
-    print $ runCircuit notA [True,True,False]
-    print $ runCircuit andA [(True,False),(True,True),(False,False)]
+    --print $ runCircuit (rsFlipFlop (False,True)) [(True,False),(True,False)]
+    print $ runCircuit (rsFlipFlop False) [(True,False),(False,False),(False,True),(False,False),(True,False)]
+--    print $ runCircuit notA [True,True,False]
+--    print $ runCircuit andA [(True,False),(True,True),(False,False)]
     --let x = total Cat.. total
     --print $ runCircuit total [1,0,1,0,0,2]
 
