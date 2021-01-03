@@ -33,6 +33,11 @@ instance Arrow Circuit where
         let (cir', c) = cir b
         in (first cir', (c, d))
 
+instance ArrowLoop Circuit where
+    loop (Circuit cir) = Circuit $ \b ->
+        let (cir', (c,d)) = cir (b,d)
+        in  (loop cir', c)
+
 runCircuit :: Circuit a b -> [a] -> [b]
 runCircuit _ [] = []
 runCircuit cir (x:xs) =
@@ -77,6 +82,8 @@ andA = Circuit $ \(a,b) -> (andA, a && b)
 
 orA :: Circuit (Bool,Bool) Bool
 orA = Circuit $ \(a,b) -> (orA, a || b)
+
+norA = Circuit $ \(a,b) -> (norA, (a || b) && (not a && not b))
 
 halfAdderA :: Circuit (Bool,Bool) (Bool, Bool)
 halfAdderA = Circuit $ \(a,b) -> (halfAdderA, (a !|| b, a && b))
@@ -128,22 +135,69 @@ orGate' = proc (a,b) -> do
 delay :: a -> Circuit a a
 delay last = Circuit $ \this -> (delay this, last)
 
-exF :: (a -> (b,c)) -> (a -> c)
-exF f = (\x -> snd (f x)) where
 
 
-rsFlipFlop :: Bool -> Circuit (Bool,Bool) Bool
+rsFlipFlop :: (Bool,Bool) -> Circuit (Bool,Bool) (Bool,Bool)
 rsFlipFlop last = Circuit $ f where
-    f (False,True)  = (rsFlipFlop False, False)
-    f (True,False)  = (rsFlipFlop True, True)
+    f (False,True)  = (rsFlipFlop (False,True), (False,True))
+    f (True,False)  = (rsFlipFlop (True,False), (True,False))
     f (False,False) = (rsFlipFlop last, last)
     f (True,True)   = error "RS Flip Flop cannot have (True,True) as input"
+
+--edge-triggered D type flip flop
+-- can implement this using the latch by remembering the last input and output
+--dFlipFlop
+
+-- level triggered d type latch
+ltDLatch :: Bool -> Circuit (Bool,Bool) Bool
+ltDLatch last = Circuit $ f where
+    f (False,_) = (ltDLatch last, last)
+    f (True ,False)  = (ltDLatch False, False)
+    f (True ,True)  = (ltDLatch True, True)
+
+latch8Bit :: Circuit (Bool, Bus8Bit) Bus8Bit
+latch8Bit = proc (latch,(d0,d1,d2,d3,d4,d5,d6,d7)) -> do
+    q0 <- ltDLatch False -< (latch,d0)
+    q1 <- ltDLatch False -< (latch,d1)
+    q2 <- ltDLatch False -< (latch,d2)
+    q3 <- ltDLatch False -< (latch,d3)
+    q4 <- ltDLatch False -< (latch,d4)
+    q5 <- ltDLatch False -< (latch,d5)
+    q6 <- ltDLatch False -< (latch,d6)
+    q7 <- ltDLatch False -< (latch,d7)
+    returnA -< (q0,q1,q2,q3,q4,q5,q6,q7)
+
+ffR :: Circuit (Bool,Bool) Bool
+ffR = proc (s1,s2) -> do
+    rec
+        o1 <- norA -< (s1,common)
+        o2 <- norA -< (s2,o1)
+        (common,o3) <- splittedWire -< o2
+    returnA -< o3
+
+edgeDFlipFlop :: (Bool,Bool) -> Circuit Bool Bool
+edgeDFlipFlop (lastClk,state) = Circuit $ f where
+    f clk  = (edgeDFlipFlop (clk,newState clk),newState clk)
+    newState clk = if lastClk && not clk then not state else state
+
+halfFreq :: Circuit Bool Bool
+halfFreq = proc inp -> do
+    o1 <- edgeDFlipFlop (False,False) -< inp
+    o2 <- edgeDFlipFlop (False,False) -< o1
+    returnA -< o2
+
+blend' = (foldr($)[].) . (.map(:)) . zipWith(.) . map(:)
+
+altList n = take n $ blend' (repeat True) (repeat False)
 
 --main :: IO Bool
 main = do
     print $ runCircuit (delay 0) [5,6,7]
-    --print $ runCircuit (rsFlipFlop (False,True)) [(True,False),(True,False)]
-    print $ runCircuit (rsFlipFlop False) [(True,False),(False,False),(False,True),(False,False),(True,False)]
+--    print $ runCircuit (rsFlipFlop (False,False)) $ [(True,False),(True,True),(False,False)]
+--    print $ runCircuit ffR        $ [(True,False),(True,True),(False,False)]
+    print $ runCircuit (edgeDFlipFlop (False,False)) $ [True,False,True,False,True,False,True,False]
+    print $ runCircuit halfFreq $ altList 50
+--    print $ runCircuit (edgeDFlipFlop False) $ [False,False,True,True,False,False,True,True]
 --    print $ runCircuit notA [True,True,False]
 --    print $ runCircuit andA [(True,False),(True,True),(False,False)]
     --let x = total Cat.. total
