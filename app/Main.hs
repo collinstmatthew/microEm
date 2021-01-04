@@ -1,8 +1,9 @@
 {-# LANGUAGE Arrows #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-
 module Main where
+
+import Prelude hiding (Bool(..),not,(&&),(||))
 
 import Control.Arrow
 import Control.Monad
@@ -12,20 +13,30 @@ import Data.List
 
 import Data.Maybe
 
-type Bus8Bit = (Bool,Bool,Bool,Bool,Bool,Bool,Bool,Bool)
-type CarryIn = Bool
-type CarryOut = Bool
+
+data Bit = High | Low deriving (Eq)
+
+instance Show Bit where
+    show High = "1"
+    show Low  = "0"
+
+
+type Byte = (Bit,Bit,Bit,Bit,Bit,Bit,Bit,Bit)
+
+
+type CarryIn = Bit
+type CarryOut = Bit
 
 newtype Circuit a b = Circuit { unCircuit :: a -> (Circuit a b, b) }
 
 instance Cat.Category Circuit where
     id = Circuit $ \a -> (Cat.id, a)
-    (.) = kdot
+    (.) = dot
       where
-        (Circuit cir2) `kdot` (Circuit cir1) = Circuit $ \a ->
+        (Circuit cir2) `dot` (Circuit cir1) = Circuit $ \a ->
             let (cir1', b) = cir1 a
                 (cir2', c) = cir2 b
-            in  (cir2' `kdot` cir1',c)
+            in  (cir2' `dot` cir1',c)
 
 instance Arrow Circuit where
     arr f = Circuit $ \a -> (arr f, f a)
@@ -44,59 +55,44 @@ runCircuit cir (x:xs) =
     let (cir',x')= unCircuit cir x
     in x' : runCircuit cir' xs
 
--- | Accumulator that outputs a value determined by the supplied function.
-accum :: acc -> (a -> acc -> (b, acc)) -> Circuit a b
-accum acc f = Circuit $ \input ->
-    let (output, acc') = input `f` acc
-    in  (accum acc' f, output)
+not :: Bit -> Bit
+not High = Low
+not Low = High
 
--- | Accumulator that outputs the accumulator value.
-accum' :: b -> (a -> b -> b) -> Circuit a b
-accum' acc f = accum acc (\a b ->  (a `f` b , a `f` b ))
+(&&) :: Bit -> Bit -> Bit
+(&&) High High = High
+(&&) _ _ = Low
 
-total :: Num a => Circuit a a
-total = accum' 0 (+)
-
--- Returns true the first time and then false afterwards
-oneShot :: Circuit () Bool
-oneShot = accum True $ \_ acc -> (acc, False)
+(||) :: Bit -> Bit -> Bit
+(||) High _    = High
+(||) _    High = High
+(||) _    _    = Low
 
 -- nand gate
-(~&&) :: Bool -> Bool -> Bool
+(~&&) :: Bit -> Bit -> Bit
 (~&&) a b = not $ a && b
 
 -- exclusive or
-(!||) :: Bool -> Bool -> Bool
+(!||) :: Bit -> Bit -> Bit
 (!||) a b = (a || b) && (a ~&& b)
-
-halfAdder :: Bool -> Bool -> (Bool, Bool)
-halfAdder a b = (a !|| b, a && b)
-
-
-
-notA :: Circuit Bool Bool
-notA = Circuit $ \a -> (notA, not a)
-
-andA :: Circuit (Bool,Bool) Bool
-andA = Circuit $ \(a,b) -> (andA, a && b)
-
-orA :: Circuit (Bool,Bool) Bool
-orA = Circuit $ \(a,b) -> (orA, a || b)
 
 norA = Circuit $ \(a,b) -> (norA, (a || b) && (not a && not b))
 
-halfAdderA :: Circuit (Bool,Bool) (Bool, Bool)
+halfAdder :: Bit -> Bit -> (Bit, Bit)
+halfAdder a b = (a !|| b, a && b)
+
+halfAdderA :: Circuit (Bit,Bit) (Bit, Bit)
 halfAdderA = Circuit $ \(a,b) -> (halfAdderA, (a !|| b, a && b))
 
-fullAdderA :: Circuit (Bool,Bool,Bool) (Bool,Bool)
+fullAdderA :: Circuit (Bit,Bit,Bit) (Bit,Bit)
 fullAdderA = proc (carryIn,a,b) -> do
     (s1,co1) <- halfAdderA -< (a,b)
     (s2,co2) <- halfAdderA -< (carryIn,s1)
-    carryOut <- orA -< (co1,co2)
+    carryOut <- arr (uncurry (||)) -< (co1,co2)
     wire -< (s2,carryOut)
 
 -- maybe can make this better by mapping over the tuple somehow
-adder8BitA :: Circuit (CarryIn, Bus8Bit, Bus8Bit) (CarryOut, Bus8Bit)
+adder8BitA :: Circuit (CarryIn, Byte, Byte) (CarryOut, Byte)
 adder8BitA = proc (carryIn,(a0,a1,a2,a3,a4,a5,a6,a7),(b0,b1,b2,b3,b4,b5,b6,b7)) -> do
     (s0,co0) <- fullAdderA -< (carryIn, a0, b0)
     (s1,co1) <- fullAdderA -< (co0, a1, b1)
@@ -111,22 +107,22 @@ adder8BitA = proc (carryIn,(a0,a1,a2,a3,a4,a5,a6,a7),(b0,b1,b2,b3,b4,b5,b6,b7)) 
 wire :: Circuit a a
 wire = Cat.id
 
-splittedWire :: Circuit Bool (Bool,Bool)
+splittedWire :: Circuit Bit (Bit,Bit)
 splittedWire = (wire &&& wire)
 
-nandGate :: Circuit (Bool,Bool) Bool
+nandGate :: Circuit (Bit,Bit) Bit
 nandGate = Circuit $ \(a,b) -> (nandGate, not (a && b))
 
-inverter :: Circuit Bool Bool
+inverter :: Circuit Bit Bit
 inverter = splittedWire >>> nandGate
 
-parallelInverters :: Circuit (Bool,Bool) (Bool,Bool)
+parallelInverters :: Circuit (Bit,Bit) (Bit,Bit)
 parallelInverters = inverter *** inverter
 
-orGate :: Circuit (Bool,Bool) Bool
+orGate :: Circuit (Bit,Bit) Bit
 orGate = parallelInverters >>> nandGate
 
-orGate' :: Circuit (Bool,Bool) Bool
+orGate' :: Circuit (Bit,Bit) Bit
 orGate' = proc (a,b) -> do
     m1 <- nandGate -< (a,a)
     m2 <- nandGate -< (b,b)
@@ -135,71 +131,57 @@ orGate' = proc (a,b) -> do
 delay :: a -> Circuit a a
 delay last = Circuit $ \this -> (delay this, last)
 
-
-
-rsFlipFlop :: (Bool,Bool) -> Circuit (Bool,Bool) (Bool,Bool)
+rsFlipFlop :: (Bit,Bit) -> Circuit (Bit,Bit) (Bit,Bit)
 rsFlipFlop last = Circuit $ f where
-    f (False,True)  = (rsFlipFlop (False,True), (False,True))
-    f (True,False)  = (rsFlipFlop (True,False), (True,False))
-    f (False,False) = (rsFlipFlop last, last)
-    f (True,True)   = error "RS Flip Flop cannot have (True,True) as input"
-
---edge-triggered D type flip flop
--- can implement this using the latch by remembering the last input and output
---dFlipFlop
+    f (Low,High)  = (rsFlipFlop (Low,High), (Low,High))
+    f (High,Low)  = (rsFlipFlop (High,Low), (High,Low))
+    f (Low,Low)   = (rsFlipFlop last, last)
+    f (High,High) = error "RS Flip Flop cannot have (High,High) as input"
 
 -- level triggered d type latch
-ltDLatch :: Bool -> Circuit (Bool,Bool) Bool
+ltDLatch :: Bit -> Circuit (Bit,Bit) Bit
 ltDLatch last = Circuit $ f where
-    f (False,_) = (ltDLatch last, last)
-    f (True ,False)  = (ltDLatch False, False)
-    f (True ,True)  = (ltDLatch True, True)
+    f (Low ,_)    = (ltDLatch last, last)
+    f (High,Low)  = (ltDLatch Low, Low)
+    f (High,High) = (ltDLatch High, High)
 
-latch8Bit :: Circuit (Bool, Bus8Bit) Bus8Bit
-latch8Bit = proc (latch,(d0,d1,d2,d3,d4,d5,d6,d7)) -> do
-    q0 <- ltDLatch False -< (latch,d0)
-    q1 <- ltDLatch False -< (latch,d1)
-    q2 <- ltDLatch False -< (latch,d2)
-    q3 <- ltDLatch False -< (latch,d3)
-    q4 <- ltDLatch False -< (latch,d4)
-    q5 <- ltDLatch False -< (latch,d5)
-    q6 <- ltDLatch False -< (latch,d6)
-    q7 <- ltDLatch False -< (latch,d7)
-    returnA -< (q0,q1,q2,q3,q4,q5,q6,q7)
+latch8Bit :: Circuit (Bit, Byte) Byte
+latch8Bit = proc (latch,(d7,d6,d5,d4,d3,d2,d1,d0)) -> do
+    q0 <- ltDLatch Low -< (latch,d0)
+    q1 <- ltDLatch Low -< (latch,d1)
+    q2 <- ltDLatch Low -< (latch,d2)
+    q3 <- ltDLatch Low -< (latch,d3)
+    q4 <- ltDLatch Low -< (latch,d4)
+    q5 <- ltDLatch Low -< (latch,d5)
+    q6 <- ltDLatch Low -< (latch,d6)
+    q7 <- ltDLatch Low -< (latch,d7)
+    returnA -< (q7,q6,q5,q4,q3,q2,q1,q0)
 
-ffR :: Circuit (Bool,Bool) Bool
-ffR = proc (s1,s2) -> do
-    rec
-        o1 <- norA -< (s1,common)
-        o2 <- norA -< (s2,o1)
-        (common,o3) <- splittedWire -< o2
-    returnA -< o3
-
-edgeDFlipFlop :: (Bool,Bool) -> Circuit Bool Bool
+edgeDFlipFlop :: (Bit,Bit) -> Circuit Bit Bit
 edgeDFlipFlop (lastClk,state) = Circuit $ f where
     f clk  = (edgeDFlipFlop (clk,newState clk),newState clk)
-    newState clk = if lastClk && not clk then not state else state
+    --newState clk = if lastClk && not clk then not state else state
+    newState clk = (lastClk && not clk) !|| state
 
-halfFreq :: Circuit Bool Bool
-halfFreq = proc inp -> do
-    o1 <- edgeDFlipFlop (False,False) -< inp
-    o2 <- edgeDFlipFlop (False,False) -< o1
-    returnA -< o2
+rippleCounter8Bit :: Circuit Bit Byte
+rippleCounter8Bit = proc inp -> do
+    q1 <- edgeDFlipFlop (Low,Low) -< inp
+    q2 <- edgeDFlipFlop (Low,Low) -< q1
+    q3 <- edgeDFlipFlop (Low,Low) -< q2
+    q4 <- edgeDFlipFlop (Low,Low) -< q3
+    q5 <- edgeDFlipFlop (Low,Low) -< q4
+    q6 <- edgeDFlipFlop (Low,Low) -< q5
+    q7 <- edgeDFlipFlop (Low,Low) -< q6
+    returnA -< (q7,q6,q5,q4,q3,q2,q1,inp)
 
 blend' = (foldr($)[].) . (.map(:)) . zipWith(.) . map(:)
 
-altList n = take n $ blend' (repeat True) (repeat False)
+altList n = take n $ blend'  (repeat Low) (repeat High)
 
---main :: IO Bool
+--main :: IO Bit
 main = do
     print $ runCircuit (delay 0) [5,6,7]
---    print $ runCircuit (rsFlipFlop (False,False)) $ [(True,False),(True,True),(False,False)]
---    print $ runCircuit ffR        $ [(True,False),(True,True),(False,False)]
-    print $ runCircuit (edgeDFlipFlop (False,False)) $ [True,False,True,False,True,False,True,False]
-    print $ runCircuit halfFreq $ altList 50
---    print $ runCircuit (edgeDFlipFlop False) $ [False,False,True,True,False,False,True,True]
---    print $ runCircuit notA [True,True,False]
---    print $ runCircuit andA [(True,False),(True,True),(False,False)]
-    --let x = total Cat.. total
-    --print $ runCircuit total [1,0,1,0,0,2]
+    print $ "finished"
+    let x = runCircuit rippleCounter8Bit  $ altList 256
+    mapM_ (putStrLn . show) x
 
