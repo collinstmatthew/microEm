@@ -14,7 +14,7 @@ import Data.List
 import Data.Maybe
 
 
-data Bit = High | Low deriving (Eq)
+data Bit = High | Low deriving Eq
 
 instance Show Bit where
     show High = "1"
@@ -139,29 +139,29 @@ rsFlipFlop last = Circuit $ f where
     f (High,High) = error "RS Flip Flop cannot have (High,High) as input"
 
 -- level triggered d type latch
-ltDLatch :: Bit -> Circuit (Bit,Bit) Bit
-ltDLatch last = Circuit $ f where
-    f (Low ,_)    = (ltDLatch last, last)
-    f (High,Low)  = (ltDLatch Low, Low)
-    f (High,High) = (ltDLatch High, High)
+latch :: Bit -> Circuit (Bit,Bit) Bit
+latch last = Circuit $ f where
+    -- (write, data)
+    f (Low ,_)    = (latch last, last)
+    f (High,Low)  = (latch Low, Low)
+    f (High,High) = (latch High, High)
 
 latch8Bit :: Circuit (Bit, Byte) Byte
-latch8Bit = proc (latch,(d7,d6,d5,d4,d3,d2,d1,d0)) -> do
-    q0 <- ltDLatch Low -< (latch,d0)
-    q1 <- ltDLatch Low -< (latch,d1)
-    q2 <- ltDLatch Low -< (latch,d2)
-    q3 <- ltDLatch Low -< (latch,d3)
-    q4 <- ltDLatch Low -< (latch,d4)
-    q5 <- ltDLatch Low -< (latch,d5)
-    q6 <- ltDLatch Low -< (latch,d6)
-    q7 <- ltDLatch Low -< (latch,d7)
+latch8Bit = proc (write,(d7,d6,d5,d4,d3,d2,d1,d0)) -> do
+    q0 <- latch Low -< (write,d0)
+    q1 <- latch Low -< (write,d1)
+    q2 <- latch Low -< (write,d2)
+    q3 <- latch Low -< (write,d3)
+    q4 <- latch Low -< (write,d4)
+    q5 <- latch Low -< (write,d5)
+    q6 <- latch Low -< (write,d6)
+    q7 <- latch Low -< (write,d7)
     returnA -< (q7,q6,q5,q4,q3,q2,q1,q0)
 
 edgeDFlipFlop :: (Bit,Bit) -> Circuit Bit Bit
 edgeDFlipFlop (lastClk,state) = Circuit $ f where
-    f clk  = (edgeDFlipFlop (clk,newState clk),newState clk)
-    --newState clk = if lastClk && not clk then not state else state
-    newState clk = (lastClk && not clk) !|| state
+    f        = \clk -> (edgeDFlipFlop (clk,newState clk),newState clk)
+    newState = \clk -> (lastClk && not clk) !|| state
 
 rippleCounter8Bit :: Circuit Bit Byte
 rippleCounter8Bit = proc inp -> do
@@ -173,6 +173,59 @@ rippleCounter8Bit = proc inp -> do
     q6 <- edgeDFlipFlop (Low,Low) -< q5
     q7 <- edgeDFlipFlop (Low,Low) -< q6
     returnA -< (q7,q6,q5,q4,q3,q2,q1,inp)
+
+-- Is it possible to just define Selector 2 1
+-- and then automatically generate the component
+selector2to1 :: Circuit (Bit,(Bit,Bit)) (Bit)
+selector2to1 = arr $ f where
+    f (Low ,(d0,_)) = d0
+    f (High,(_,d1)) = d1
+
+selector8to1 :: Circuit ((Bit,Bit,Bit),Byte) Bit
+selector8to1 = arr $ f where
+--    ( s2, s1,   s0)  ,(d7,d6,d5,d4,d3,d2,d1,d0)
+    f ((Low ,Low ,Low) ,(_,_,_,_,_,_,_,d0)) = d0
+    f ((Low ,Low ,High),(_,_,_,_,_,_,d1,_)) = d1
+    f ((Low ,High,Low) ,(_,_,_,_,_,d2,_,_)) = d2
+    f ((Low ,High,High),(_,_,_,_,d3,_,_,_)) = d3
+    f ((High,Low ,Low) ,(_,_,_,d4,_,_,_,_)) = d4
+    f ((High,Low ,High),(_,_,d5,_,_,_,_,_)) = d5
+    f ((High,High,Low) ,(_,d6,_,_,_,_,_,_)) = d6
+    f ((High,High,High),(d7,_,_,_,_,_,_,_))  = d7
+
+decoder1to2 :: Circuit (Bit,Bit)(Bit,Bit)
+decoder1to2 = arr $ f where
+    f (Low,dat)  = (Low,dat)
+    f (High,dat) = (dat,Low)
+
+decoder3to8 :: Circuit ((Bit,Bit,Bit),Bit) Byte
+decoder3to8 = arr $ f where
+--  f ((s2  ,s1  ,s0)  ,data)= (o7 ,o6 ,o5 ,o4 ,o3 ,o2 ,o1 ,o0)
+    f ((Low ,Low ,Low) ,dat) = (Low,Low,Low,Low,Low,Low,Low,dat)
+    f ((Low ,Low ,High),dat) = (Low,Low,Low,Low,Low,Low,dat,Low)
+    f ((Low ,High,Low) ,dat) = (Low,Low,Low,Low,Low,dat,Low,Low)
+    f ((Low ,High,High),dat) = (Low,Low,Low,Low,dat,Low,Low,Low)
+    f ((High,Low ,Low) ,dat) = (Low,Low,Low,dat,Low,Low,Low,Low)
+    f ((High,Low ,High),dat) = (Low,Low,dat,Low,Low,Low,Low,Low)
+    f ((High,High,Low) ,dat) = (Low,dat,Low,Low,Low,Low,Low,Low)
+    f ((High,High,High),dat) = (dat,Low,Low,Low,Low,Low,Low,Low)
+
+-- ((a2,a1,a0),write,dataIn) dataOut
+ram8t1 :: Circuit ((Bit,Bit,Bit),Bit,Bit) Bit
+ram8t1 = proc ((a2,a1,a0),write,dat) -> do
+    (o7,o6,o5,o4,o3,o2,o1,o0) <- decoder3to8  -< ((a2,a1,a0),write)
+    d0 <- latch Low -< (o0,dat)
+    d1 <- latch Low -< (o1,dat)
+    d2 <- latch Low -< (o2,dat)
+    d3 <- latch Low -< (o3,dat)
+    d4 <- latch Low -< (o4,dat)
+    d5 <- latch Low -< (o5,dat)
+    d6 <- latch Low -< (o6,dat)
+    d7 <- latch Low -< (o7,dat)
+
+    dataOut <-  selector8to1 -< ((a2,a1,a0),(d7,d6,d5,d4,d3,d2,d1,d0))
+    returnA -< dataOut
+
 
 blend' = (foldr($)[].) . (.map(:)) . zipWith(.) . map(:)
 
