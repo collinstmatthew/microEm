@@ -9,12 +9,11 @@ import Prelude hiding (Bool(..),not,(&&),(||))
 
 import qualified Control.Category as Cat
 
-
 import Control.Arrow
 import Control.Monad
+
 import Data.List
 import Data.Maybe
-import Data.Functor.Compose
 
 import Control.Lens.Tuple
 import Control.Lens.Setter
@@ -36,7 +35,7 @@ type CarryOut = Bit
 -- # TODO change this to a list
 type Address = [Bit]
 -- # TODO make the data out into a list as well
-type Data    = Bit
+type Data    = [Bit]
 type Write   = Bit
 
 newtype Circuit a b = Circuit { unCircuit :: a -> (Circuit a b, b) }
@@ -45,6 +44,23 @@ newtype Circuit a b = Circuit { unCircuit :: a -> (Circuit a b, b) }
 data Ram = Ram { unRam :: (Circuit (Address,Write,Data) Data),
                     -- (log_2 number of addresses,log_2 size of databus)
                  size :: (Int,Int)}
+
+splitHalf :: [a] -> ([a],[a])
+splitHalf l = splitAt ((length l + 1) `div` 2) l
+
+blend' :: [a] -> [a] -> [a]
+blend'    = (foldr($)[].) . (.map(:)) . zipWith(.) . map(:)
+
+altList :: Int -> [Bit]
+altList n = take n $ blend'  (repeat Low) (repeat High)
+
+-- build specified size of the ram
+buildRam :: (Int,Int) -> Ram
+buildRam (addressN,busN) | addressN < 3 = error "number of ram addresses can't < 8"
+                         | otherwise    = expandData where
+                            expandAddress = (iterate doubleRamAddress ram8t1)!!(addressN-3)
+                            expandData    = (iterate doubleRamBus expandAddress)!!(busN-1)
+
 
 -- This doubles the number of addresses that are held in the ram
 doubleRamAddress :: Ram -> Ram
@@ -58,6 +74,17 @@ doubleRamAddress ram = Ram circuit $ size ram & _1 +~ 1 where
         dataOut   <- selector2to1 -< (aNew,(d0,d1))
 
         returnA -< dataOut
+
+-- could always build up these ram recusively by calling smaller ram I guess?
+doubleRamBus :: Ram -> Ram
+doubleRamBus ram = Ram circuit $ size ram & _2 +~ 1 where
+    circuit = proc (address,write,dat) -> do
+        let (dat1,dat2) = splitHalf dat
+
+        out1 <- unRam ram -< (address,write,dat1)
+        out2 <- unRam ram -< (address,write,dat2)
+
+        returnA -< (out1 ++ out2)
 
 instance Cat.Category Circuit where
     id = Circuit $ \a -> (Cat.id, a)
@@ -78,10 +105,6 @@ instance ArrowLoop Circuit where
     loop (Circuit cir) = Circuit $ \b ->
         let (cir', (c,d)) = cir (b,d)
         in  (loop cir', c)
-
---combine :: Circuit Ram a b -> Circuit (Ram a b) -> Circuit (Ram a b)
---combine x y = a
-
 
 runCircuit :: Circuit a b -> [a] -> [b]
 runCircuit _ [] = []
@@ -220,7 +243,7 @@ rippleCounter8Bit = proc inp -> do
 
 -- Is it possible to just define Selector 2 1
 -- and then automatically generate the component
-selector2to1 :: Circuit (Bit,(Bit,Bit)) (Bit)
+selector2to1 :: Circuit (Bit,(Data,Data)) Data
 selector2to1 = arr $ f where
     f (Low ,(d0,_)) = d0
     f (High,(_,d1)) = d1
@@ -238,10 +261,10 @@ selector8to1 = arr $ f where
     f ((High,High,High),(d7,_,_,_,_,_,_,_)) = d7
 
 --(select, data)-> (d1,d0)
-decoder1to2 :: Circuit (Bit,Bit)(Bit,Bit)
+decoder1to2 :: Circuit (Bit,Data) (Data,Data)
 decoder1to2 = arr $ f where
-    f (Low,dat)  = (Low,dat)
-    f (High,dat) = (dat,Low)
+    f (Low,dat)  = (replicate (length dat) Low,dat)
+    f (High,dat) = (dat,replicate (length dat) Low)
 
 decoder3to8 :: Circuit ((Bit,Bit,Bit),Bit) Byte
 decoder3to8 = arr $ f where
@@ -255,51 +278,35 @@ decoder3to8 = arr $ f where
     f ((High,High,Low) ,dat) = (Low,dat,Low,Low,Low,Low,Low,Low)
     f ((High,High,High),dat) = (dat,Low,Low,Low,Low,Low,Low,Low)
 
--- ((a2,a1,a0),write,dataIn) dataOut
-ram8t1 :: Circuit ((Bit,Bit,Bit),Bit,Bit) Bit
-ram8t1 = proc ((a2,a1,a0),write,dat) -> do
+ram8t1 :: Ram
+ram8t1 = Ram circuit (3,1) where
+            circuit = proc ([a2,a1,a0],write,[dat]) -> do
+                (o7,o6,o5,o4,o3,o2,o1,o0) <- decoder3to8  -< ((a2,a1,a0),write)
+                d0 <- latch Low -< (o0,dat)
+                d1 <- latch Low -< (o1,dat)
+                d2 <- latch Low -< (o2,dat)
+                d3 <- latch Low -< (o3,dat)
+                d4 <- latch Low -< (o4,dat)
+                d5 <- latch Low -< (o5,dat)
+                d6 <- latch Low -< (o6,dat)
+                d7 <- latch Low -< (o7,dat)
+                dataOut <-  selector8to1 -< ((a2,a1,a0),(d7,d6,d5,d4,d3,d2,d1,d0))
+                returnA -< [dataOut]
 
-    (o7,o6,o5,o4,o3,o2,o1,o0) <- decoder3to8  -< ((a2,a1,a0),write)
-
-    d0 <- latch Low -< (o0,dat)
-    d1 <- latch Low -< (o1,dat)
-    d2 <- latch Low -< (o2,dat)
-    d3 <- latch Low -< (o3,dat)
-    d4 <- latch Low -< (o4,dat)
-    d5 <- latch Low -< (o5,dat)
-    d6 <- latch Low -< (o6,dat)
-    d7 <- latch Low -< (o7,dat)
-
-    dataOut <-  selector8to1 -< ((a2,a1,a0),(d7,d6,d5,d4,d3,d2,d1,d0))
-
-    returnA -< dataOut
-
--- should be able to generalise this into a horizontal expansion somehow with an oporator
--- ((a2,a1,a0),write,(dataIn1,dataIn2)) -> (out1,out2)
-ram8t2 :: Circuit ((Bit,Bit,Bit),Bit,(Bit,Bit)) (Bit,Bit)
-ram8t2 = proc ((a2,a1,a0),write,(dat1,dat2)) -> do
-
-    out1 <- ram8t1 -< ((a2,a1,a0),write,dat1)
-    out2 <- ram8t1 -< ((a2,a1,a0),write,dat2)
-
-    returnA -< (out1,out2)
-
--- page 200
--- ((a3,a2,a1,a0),write,dataIn) -> dataOut
-ram16t1 :: Circuit ((Bit,Bit,Bit,Bit),Bit,Bit) Bit
-ram16t1 = proc ((a3,a2,a1,a0),write,dat) -> do
-
-    (do1,do0) <- decoder1to2 -< (a3,dat)
-    d1        <- ram8t1       -< ((a2,a1,a0),write,do1)
-    d0        <- ram8t1       -< ((a2,a1,a0),write,do0)
-    dataOut   <- selector2to1 -< (a3,(d0,d1))
-
-    returnA -< dataOut
-
-blend'    = (foldr($)[].) . (.map(:)) . zipWith(.) . map(:)
-altList n = take n $ blend'  (repeat Low) (repeat High)
 
 --main :: IO Bit
 main = do
-    print $ runCircuit (delay 0) [5,6,7]
-    print $ "finished"
+
+    let testData' = [([High,High,Low,Low],High,[High]),
+                     ([Low,Low,Low,Low],Low,[High]),
+                     ([High,Low,Low,Low],Low,[High]),
+                     ([Low,High,Low,Low],Low,[High]),
+                     ([High,High,Low,Low],Low,[Low])
+                    ]
+
+    let y = runCircuit (unRam (doubleRamAddress ram8t1)) testData'
+    let expectedResult = [[High],[Low],[Low],[Low],[High]]
+    print $ y == expectedResult
+    let z = buildRam (6,6)
+    print $ size z
+
