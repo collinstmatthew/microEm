@@ -9,4 +9,3 @@ runCircuit _ [] = []
 runCircuit cir (x:xs) =
     let (cir',x')= unCircuit cir x
     in x' : runCircuit cir' xs
-

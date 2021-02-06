@@ -15,10 +15,6 @@ import Control.Monad
 import Data.List
 import Data.Maybe
 
-import Control.Lens.Tuple
-import Control.Lens.Setter
-import Control.Lens.Operators
-
 import Types
 import Circuit(runCircuit)
 import Components.Memory(buildRam)
